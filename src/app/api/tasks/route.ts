@@ -1,51 +1,79 @@
 import { NextResponse } from "next/server";
+import { prisma } from "@/lib/prisma";
 
-// This would connect to Notion API
-// For now, return mock data
+function mapHermesStatusToUiStatus(hermesStatus: string): string {
+  switch (hermesStatus) {
+    case 'triage':
+    case 'todo':
+    case 'ready':
+      return 'Not started';
+    case 'running':
+      return 'In progress';
+    case 'done':
+      return 'Done';
+    case 'blocked':
+      return 'Blocked';
+    default:
+      return 'Not started';
+  }
+}
 
-const NOTION_API_KEY = process.env.NOTION_API_KEY;
-const DATABASE_ID = "1264208d-f768-4604-b4cb-09f4d6fd41e3"; // Max's Tasks DB
+function mapUiStatusToHermesStatus(uiStatus: string): string {
+  switch (uiStatus) {
+    case 'Not started':
+      return 'todo';
+    case 'Blocked':
+      return 'blocked';
+    case 'In progress':
+      return 'running';
+    case 'Done':
+      return 'done';
+    default:
+      return 'todo';
+  }
+}
+
+function mapPriorityToString(priority: number | null): string {
+  if (priority === null) return '';
+  switch (priority) {
+    case 1: return 'High';
+    case 2: return 'Medium';
+    case 3: return 'Low';
+    default: return '';
+  }
+}
 
 export async function GET() {
   try {
-    if (!NOTION_API_KEY) {
-      // Return mock data if no API key
-      return NextResponse.json({
-        tasks: [
-          { id: "1", name: "Review Polymarket bot strategy", status: "In progress", priority: "High", category: "Research" },
-          { id: "2", name: "Build Hermy HQ dashboard", status: "In progress", priority: "High", category: "Content" },
-          { id: "3", name: "Daily brief automation", status: "Approved", priority: "Medium", category: "Admin" },
-        ],
-      });
-    }
-
-    const res = await fetch(`https://api.notion.com/v1/databases/${DATABASE_ID}/query`, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${NOTION_API_KEY}`,
-        "Notion-Version": "2022-06-28",
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        filter: {
-          property: "Status",
-          status: {
-            does_not_equal: "Done",
-          },
+    const hermesTasks = await prisma.hermesTask.findMany({
+      where: {
+        status: {
+          not: 'archived',
         },
-      }),
+      },
+      select: {
+        id: true,
+        title: true,
+        status: true,
+        priority: true,
+        assignee: true,
+        result: true,
+        updatedAt: true,
+      },
+      orderBy: {
+        updatedAt: 'desc',
+      },
     });
 
-    const data = await res.json();
-    
-    const tasks = data.results?.map((page: any) => ({
-      id: page.id,
-      name: page.properties.Name?.title?.[0]?.plain_text || "Untitled",
-      status: page.properties.Status?.status?.name || "Not started",
-      priority: page.properties.Priority?.select?.name || "",
-      category: page.properties.Category?.select?.name || "",
-      dueDate: page.properties["Due Date"]?.date?.start || null,
-    })) || [];
+    const tasks = hermesTasks.map((task) => ({
+      id: task.id,
+      name: task.title,
+      status: mapHermesStatusToUiStatus(task.status),
+      priority: mapPriorityToString(task.priority),
+      category: task.assignee ?? '',
+      result: task.result ?? '',
+      dueDate: task.updatedAt ? task.updatedAt.toISOString().split('T')[0] : undefined,
+    }));
 
     return NextResponse.json({ tasks });
   } catch (error) {
@@ -56,30 +84,53 @@ export async function GET() {
 
 export async function POST(req: Request) {
   try {
-    const { name, status } = await req.json();
-    
-    if (!NOTION_API_KEY) {
-      return NextResponse.json({ success: true, message: "Mock - would create task in Notion" });
+    const { name } = await req.json();
+
+    if (!name || typeof name !== 'string') {
+      return NextResponse.json({ error: "Task name is required" }, { status: 400 });
     }
 
-    const res = await fetch("https://api.notion.com/v1/pages", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${NOTION_API_KEY}`,
-        "Notion-Version": "2022-06-28",
-        "Content-Type": "application/json",
+    // Create HermesTask
+    const hermesTask = await prisma.hermesTask.create({
+      data: {
+    id: `t_${crypto.randomUUID().replace(/-/g, "").slice(0, 8)}`,
+        title: name,
+        status: 'todo', // Initial status for new tasks from UI
+        priority: null,
+        assignee: null,
+        result: null,
+        updatedAt: new Date(),
+        syncedAt: new Date(),
       },
-      body: JSON.stringify({
-        parent: { database_id: DATABASE_ID },
-        properties: {
-          Name: { title: [{ text: { content: name } }] },
-          Status: { status: { name: status || "Not started" } },
-        },
-      }),
     });
 
-    const data = await res.json();
-    return NextResponse.json({ success: true, task: data });
+    // Create AgentRequest for logging/tracking (marked as done so bridge doesn't process)
+    await prisma.agentRequest.create({
+      data: {
+        origin: 'web',
+        kind: 'kanban',
+        title: name,
+        hermesTaskId: hermesTask.id,
+        status: 'done',
+        result: 'Task created via Hermy HQ',
+        decidedAt: new Date(),
+        finishedAt: new Date(),
+        updatedAt: new Date(),
+      },
+    });
+
+    // Return the created task in the expected format
+    const task = {
+      id: hermesTask.id,
+      name: hermesTask.title,
+      status: mapHermesStatusToUiStatus(hermesTask.status),
+      priority: mapPriorityToString(hermesTask.priority),
+      category: hermesTask.assignee ?? '',
+      result: hermesTask.result ?? '',
+      dueDate: hermesTask.updatedAt ? hermesTask.updatedAt.toISOString().split('T')[0] : undefined,
+    };
+
+    return NextResponse.json({ success: true, task });
   } catch (error) {
     console.error("Create task error:", error);
     return NextResponse.json({ error: "Failed to create task" }, { status: 500 });
@@ -88,28 +139,48 @@ export async function POST(req: Request) {
 
 export async function PATCH(req: Request) {
   try {
-    const { id, status } = await req.json();
-    
-    if (!NOTION_API_KEY) {
-      return NextResponse.json({ success: true, message: "Mock - would update task in Notion" });
+    const { id, status: uiStatus } = await req.json();
+
+    if (!id || !uiStatus) {
+      return NextResponse.json({ error: "Task ID and status are required" }, { status: 400 });
     }
 
-    const res = await fetch(`https://api.notion.com/v1/pages/${id}`, {
-      method: "PATCH",
-      headers: {
-        Authorization: `Bearer ${NOTION_API_KEY}`,
-        "Notion-Version": "2022-06-28",
-        "Content-Type": "application/json",
+    const hermesStatus = mapUiStatusToHermesStatus(uiStatus);
+
+    // Update HermesTask
+    const hermesTask = await prisma.hermesTask.update({
+      where: { id },
+      data: {
+        status: hermesStatus,
+        updatedAt: new Date(),
       },
-      body: JSON.stringify({
-        properties: {
-          Status: { status: { name: status } },
-        },
-      }),
     });
 
-    const data = await res.json();
-    return NextResponse.json({ success: true, task: data });
+    // Update corresponding AgentRequest if it exists
+    await prisma.agentRequest.updateMany({
+      where: {
+        hermesTaskId: id,
+        kind: 'kanban',
+      },
+      data: {
+        status: 'done',
+        result: `Task status updated to ${uiStatus}`,
+        updatedAt: new Date(),
+      },
+    });
+
+    // Return the updated task
+    const task = {
+      id: hermesTask.id,
+      name: hermesTask.title,
+      status: mapHermesStatusToUiStatus(hermesTask.status),
+      priority: mapPriorityToString(hermesTask.priority),
+      category: hermesTask.assignee ?? '',
+      result: hermesTask.result ?? '',
+      dueDate: hermesTask.updatedAt ? hermesTask.updatedAt.toISOString().split('T')[0] : undefined,
+    };
+
+    return NextResponse.json({ success: true, task });
   } catch (error) {
     console.error("Update task error:", error);
     return NextResponse.json({ error: "Failed to update task" }, { status: 500 });

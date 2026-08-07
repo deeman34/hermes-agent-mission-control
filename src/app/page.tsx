@@ -548,12 +548,15 @@ export default function Dashboard() {
           </div>
         </div>
 
-        {/* ── Brief + Approval inbox (side-by-side on wide) ─ */}
+        {/* ── Hermes Kanban · Brief + Approval inbox ─ */}
         <div className="mt-5 grid grid-cols-1 xl:grid-cols-3 gap-5 items-start">
-          <div className="xl:col-span-2 hq-rise" style={rise(5)}>
+          <div className="xl:col-span-1 hq-rise" style={rise(5)}>
+            <HermesKanbanPanel kanban={data.hermesKanban} />
+          </div>
+          <div className="xl:col-span-2 hq-rise" style={rise(6)}>
             <HermesBriefing />
           </div>
-          <div className="xl:col-span-1 hq-rise" style={rise(6)}>
+          <div className="xl:col-span-1 hq-rise" style={rise(7)}>
             <ApprovalInbox compact />
           </div>
         </div>
